@@ -838,7 +838,7 @@ int loadForceBuffer(void* vparms, void* vdata, int face, char* charBuf)
 {
    rajaReduceSumInt nBufReduce(0);
 
-#if 0
+#if 1
    ForceExchangeParms* parms = (ForceExchangeParms*) vparms;
    ForceExchangeData* data = (ForceExchangeData*) vdata;
    ForceMsg* buf = (ForceMsg*) charBuf;
@@ -913,13 +913,13 @@ int loadForceBuffer(void* vparms, void* vdata, int face, char* charBuf)
 /// unloadBuffer parameters.
 void unloadForceBuffer(void* vparms, void* vdata, int face, int bufSize, char* charBuf)
 {
-#if 0
+#if 1
    ForceExchangeParms* parms = (ForceExchangeParms*) vparms;
    ForceExchangeData* data = (ForceExchangeData*) vdata;
    int nCells = parms->nCells[face];
    
    //#ifdef DO_CUDA
-#if 1
+#if 0
    int size = (nCells+1) * sizeof(int);
    //Make sure the memory is alligned with ForceMsg size
    if((size % sizeof(ForceMsg)) != 0)

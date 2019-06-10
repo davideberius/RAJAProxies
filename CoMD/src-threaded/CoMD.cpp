@@ -62,7 +62,6 @@
 #include "mycommand.h"
 #include "timestep.h"
 #include "constants.h"
-#include <caliper/cali.h>
 
 #define REDIRECT_OUTPUT 0
 #define   MIN(A,B) ((A) < (B) ? (A) : (B))

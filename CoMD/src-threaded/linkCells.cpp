@@ -512,7 +512,7 @@ COMD_HOST_DEVICE int getBoxFromCoord(LinkCell* boxes, real_t rr[3])
 /// Set the number of atoms to zero in all halo link cells.
 void emptyHaloCells(LinkCell* boxes)
 {
-#if 0
+#if 1
    for (int ii=boxes->nLocalBoxes; ii<boxes->nTotalBoxes; ++ii)
       boxes->nAtoms[ii] = 0;
 #else
