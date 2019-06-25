@@ -431,7 +431,7 @@ void updateLinkCells(LinkCell* boxes, Atoms* atoms)
   printf("DONE!\n");
   stopTimer(updateLinkCellsWorkSerialTimer);
 #endif
-  //stopTimer(updateLinkCellsWorkTimer);
+  stopTimer(updateLinkCellsWorkTimer);
 }
 
 /// \return The largest number of atoms in any link cell.

@@ -55,6 +55,8 @@ double timestep(SimFlat* s, int nSteps, real_t dt)
       redistributeAtoms(s);
       stopTimer(redistributeTimer);
 
+      MPI_Barrier(MPI_COMM_WORLD);
+
       startTimer(computeForceTimer);
       computeForce(s);
       stopTimer(computeForceTimer);

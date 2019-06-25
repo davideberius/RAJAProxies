@@ -17,8 +17,12 @@
 #include <omp.h>
 #endif
 
-#ifdef ENABLE_CALIPER
+#ifdef USE_CALIPER
 #include <caliper/cali.h>
+#endif
+
+#ifdef DO_MPI
+#include <mpi.h>
 #endif
 
 struct SimFlatSt;
@@ -194,7 +198,7 @@ typedef RAJA::KernelPolicy<
     RAJA::statement::For<0, RAJA::cuda_thread_x_loop,
     RAJA::statement::Lambda<0> > > > > redistributeKernel;
 
-// Used for ljForce
+// Used for Force kernels
 typedef RAJA::KernelPolicy<
 #ifdef CUDA_ASYNC
   RAJA::statement::CudaKernelAsync<
@@ -203,7 +207,7 @@ typedef RAJA::KernelPolicy<
 #endif
     RAJA::statement::For<0, RAJA::cuda_block_x_loop,
     RAJA::statement::For<1, RAJA::cuda_block_y_loop,
-    RAJA::statement::For<2, RAJA::cuda_thread_x_loop,
+    RAJA::statement::For<2, RAJA::cuda_warp_loop,
     RAJA::statement::For<3, RAJA::cuda_thread_y_loop,
     RAJA::statement::Lambda<0> > > > > > > forcePolicyKernel;
 

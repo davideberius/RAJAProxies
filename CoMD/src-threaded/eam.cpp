@@ -495,7 +495,7 @@ printf("eamForce init end\n");
          }
        }
      }); // loop over local boxes
-
+   MPI_Barrier(MPI_COMM_WORLD);
    /* Use the CPU-side ePotential global variable here instead */
    ePotential = (real_t) etot;
 

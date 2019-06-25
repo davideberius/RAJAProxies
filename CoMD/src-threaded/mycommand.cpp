@@ -235,7 +235,7 @@ Command parseCommandLine(int argc, char** argv)
    addArg("delta",      'r', 1, 'd',  &(cmd.initialDelta), 0,             "initial delta (Angstroms)");
    addArg("seed",       'S', 1, 'i',  &(cmd.seed),         0,             "seed for random generator");
    addArg("holeRadius", 'R', 1, 'd',  &(cmd.holeRadius),   0,             "radius for cutout holes (Angstroms)");
-   addArg("holeCount",  'C', 1, 'i',  &(cmd.holeCount),    0,             "nuber of cutout holes");
+   addArg("holeCount",  'C', 1, 'i',  &(cmd.holeCount),    0,             "number of cutout holes");
 
    processArgs(argc,argv);
 

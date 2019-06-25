@@ -74,6 +74,17 @@
 
 #define POT_SHIFT 1.0
 
+#define ATOM_REDUCE
+#define TIME_STUFF
+
+#ifdef ATOM_REDUCE
+FILE *atom_fptr;
+#endif
+#ifdef TIME_STUFF
+FILE *time_fptr;
+#endif
+
+
 /// Derived struct for a Lennard Jones potential.
 /// Polymorphic with BasePotential.
 /// \see BasePotential
@@ -155,6 +166,47 @@ int ljForce(SimFlat* s)
    // zero forces and energy
    rajaReduceSumRealKernel ePot(0.0);
 
+   const int x_threads = 32, y_threads = 28, total_threads = x_threads*y_threads;
+#ifdef ATOM_REDUCE
+   static int atom_reduce_count = 0;
+
+   if(atom_reduce_count == 0)
+     atom_fptr = fopen("atom_output.dat", "w+");
+   atom_reduce_count++;
+
+   long *blockCounts = (long*)comdMalloc(80*sizeof(long));
+   long *prev = (long*)comdMalloc(80*sizeof(long));
+   for(int i = 0; i < 80; i++) {
+     blockCounts[i] = 0;
+     prev[i] = -1;
+   }
+
+   long *threadCounts = (long*)comdMalloc(total_threads*sizeof(long));
+   for(int i = 0; i < total_threads; i++) {
+     threadCounts[i] = 0;
+   }
+#endif
+
+#define TIME_STUFF
+#ifdef TIME_STUFF
+   static int time_count = 0;
+
+   if(time_count == 0)
+     time_fptr = fopen("time_output.dat", "w+");
+   time_count++;
+
+   long long **start, **stop;
+   start = (long long**)comdMalloc(80*sizeof(long long*));
+   stop  = (long long**)comdMalloc(80*sizeof(long long*));
+
+   for(int i = 0; i < 80; i++) {
+     start[i] = (long long*)comdMalloc(y_threads*sizeof(long long));
+     stop[i]  = (long long*)comdMalloc(y_threads*sizeof(long long));
+     for(int j = 0; j < y_threads; j++)
+       start[i][j] = stop[i][j] = -1;
+   }
+#endif
+
    ePotential = 0.0;
 
    profileStart(forceZeroingTimer);
@@ -197,7 +249,28 @@ int ljForce(SimFlat* s)
          const int iGid = s->atoms->gid[iOff];
          const int jGid = s->atoms->gid[jOff];
 
+#ifdef TIME_STUFF
+         if(threadIdx.x == 0 && start[blockIdx.x][threadIdx.y] == -1) {
+           start[blockIdx.x][threadIdx.y] = clock64();
+         }
+#endif
+
          if( (iOffLocal < nIBox && jOffLocal < nJBox) && !(jBoxID < nLocalBoxes && jGid <= iGid)) {
+#ifdef ATOM_REDUCE
+           if(blockIdx.x == 0) {
+             threadCounts[(threadIdx.x*blockDim.y)+threadIdx.y] += 1;
+           }
+           if(threadIdx.x == 0 && threadIdx.y == 0){
+             if(prev[blockIdx.x] == -1) {
+               blockCounts[blockIdx.x] += nIBox;
+               prev[blockIdx.x] = iBoxID;
+             }
+             if(prev[blockIdx.x] != iBoxID) {
+               blockCounts[blockIdx.x] += nIBox;
+               prev[blockIdx.x] = iBoxID;
+             }
+           }
+#endif
            real3 dr;
            real_t r2 = 0.0;
            real3_ptr r =  s->atoms->r;
@@ -237,10 +310,160 @@ int ljForce(SimFlat* s)
 #endif
              }
            }  //end if within cutoff
+#ifdef TIME_STUFF
+           //stop[blockIdx.x][threadIdx.y] = clock64();
+#endif
          }//end if atoms exist
+#ifdef TIME_STUFF
+         //if(threadIdx.x == 0 && (iBoxID*jBoxID)+blockDim.x > nLocalBoxes*27) {
+         /*if(threadIdx.x == 0) {
+           stop[blockIdx.x][threadIdx.y] = clock64();
+         }*/
+         stop[blockIdx.x][threadIdx.y] = clock64();
+#endif
        });
+     MPI_Barrier(MPI_COMM_WORLD);
    profileStop(forceFunctionTimer);
    }
+
+   long sum = 0, max, min;
+   real_t average, imbalance;
+#ifdef ATOM_REDUCE
+   fprintf(atom_fptr, "%d %d %d %d\n", atom_reduce_count, 80, x_threads, y_threads);
+   for(int i = 0; i < 80; i++) {
+     fprintf(atom_fptr, "%ld ", blockCounts[i]);
+   }
+   fprintf(atom_fptr, "\n");
+   for(int i = 0; i < total_threads; i++) {
+     fprintf(atom_fptr, "%ld ", threadCounts[i]);
+   }
+   fprintf(atom_fptr, "\n");
+   /*
+     max = min = blockCounts[0];
+
+     for(int i = 0; i < 80; i++) {
+       sum += blockCounts[i];
+       if(blockCounts[i] > max)
+         max = blockCounts[i];
+       if(blockCounts[i] < min)
+         min = blockCounts[i];
+     }
+
+     average = (real_t)sum / 80.0;
+     imbalance = (((real_t)max - average) / average) * 100.0;
+     printf("Blocks:\n");
+     printf("Sum: %ld (%ld -> %ld)\nAverage: %lf\nImbalance: %3.2f%%\n", sum, min, max, average, imbalance);
+
+     int local_maxima[28] = {0};
+
+     sum = 0;
+     max = min = threadCounts[0];
+     int zeros = 0;
+     printf("0\t");
+     for(int i = 0; i < y_threads; i++)
+       printf("%d\t", i);
+     printf("\n");
+     for(int i = 0; i < x_threads; i++) {
+       printf("%d\t", i);
+       for(int j = 0; j < y_threads; j++) {
+         int count = threadCounts[(i*y_threads)+j];
+         printf("%d\t", count);
+         //printf("Thread (%d,%d): %ld\n", i, j, count);
+         if(count > max)
+           max = count;
+         if(count < min)
+           min = count;
+         if(count == 0)
+           zeros++;
+         if(count > local_maxima[j])
+           local_maxima[j] = count;
+         sum += count;
+       }
+       printf("\n");
+     }
+
+     average = (real_t)sum / (double)(total_threads);
+     imbalance = (((real_t)max - average) / average) * 100.0;
+     printf("Block 0:\n");
+     printf("Sum: %ld (%ld -> %ld)\nAverage: %lf\nImbalance: %3.2f%%\nZeros: %d (%3.2f%%)\n", sum, min, max, average, imbalance, zeros, ((double)zeros / (double)(total_threads))*100.0 );
+
+     sum = max = 0;
+     min = local_maxima[0];
+     for(int i = 0; i < y_threads; i++) {
+       sum += local_maxima[i];
+       if(local_maxima[i] > max)
+         max = local_maxima[i];
+       if(local_maxima[i] < min)
+         min = local_maxima[i];
+     }
+
+     average = (real_t)sum / (double)(y_threads);
+     imbalance = (((real_t)max - average) / average) * 100.0;
+     printf("Warp Sum: %ld (%ld -> %ld)\nWarp Average: %lf\nWarp Imbalance: %3.2f%%\n\n", sum, min, max, average, imbalance);
+*/
+     if(atom_reduce_count == s->nSteps)
+       fclose(atom_fptr);
+     comdFree(blockCounts);
+     comdFree(threadCounts);
+#endif
+
+#ifdef TIME_STUFF
+     fprintf(time_fptr, "%d %d %d\n", time_count, 80, y_threads);
+     for(int i = 0; i < 80; i++) {
+       for(int j = 0; j < y_threads; j++) {
+         fprintf(time_fptr, "%lld ", stop[i][j]-start[i][j]);
+       }
+       fprintf(time_fptr, "\n");
+     }
+     /*
+     long long block_max = 0;
+     sum = 0;
+     for(int i = 0; i < 80; i++) {
+       max = 0;
+       min = stop[i][0]-start[i][0];
+       for(int j = 0; j < y_threads; j++) {
+         int value = stop[i][j]-start[i][j];
+         if(value > max)
+           max = value;
+         if(value < min)
+           min = value;
+       }
+       sum += max;
+       if(max > block_max)
+         block_max = max;
+     }
+     max = block_max;
+     average = (real_t)sum / (double)(80);
+     imbalance = (((real_t)max - average) / average) * 100.0;
+     printf("Block Time Sum: %ld (%ld -> %ld)\nBlock Time Average: %lf\nBlock Time Imbalance: %3.2f%%\n\n", sum, min, max, average, imbalance);
+
+     sum = 0;
+     for(int i = 0; i < 1; i++) {
+       max = 0;
+       min = stop[i][0]-start[i][0];
+       for(int j = 0; j < y_threads; j++) {
+         int value = stop[i][j]-start[i][j];
+         sum += value;
+         if(value > max)
+           max = value;
+         if(value < min)
+           min = value;
+       }
+     }
+
+     average = (real_t)sum / (double)(y_threads);
+     imbalance = (((real_t)max - average) / average) * 100.0;
+     printf("Warp Time Sum: %ld (%ld -> %ld)\nWarp Time Average: %lf\nWarp Time Imbalance: %3.2f%%\n\n", sum, min, max, average, imbalance);
+     */
+     if(time_count == s->nSteps)
+       fclose(time_fptr);
+     for(int i = 0; i < 80; i++) {
+       comdFree(start[i]);
+       comdFree(stop[i]);
+     }
+       comdFree(start);
+       comdFree(stop);
+#endif
 
    ePotential = ePot*4.0*epsilon;
 

@@ -251,6 +251,7 @@ int is_within_spheres(struct SimFlatSt* s, real3 *sphere_pos, const int count, c
 void performCutout(struct SimFlatSt* s, int count, const double radius)
 {
    int total = s->atoms->nLocal * getNRanks();
+   int local_total = s->atoms->nLocal;
 
    real3 sphere_pos[count];
 
@@ -287,15 +288,36 @@ void performCutout(struct SimFlatSt* s, int count, const double radius)
 
    // sum
    int total_removed = 0;
-   addIntParallelRoot(&removed, &total_removed, 1, rankOfPrintRank());
+   //addIntParallelRoot(&removed, &total_removed, 1, rankOfPrintRank());
+
+   for(int i = 0; i < getNRanks(); i++) {
+     int temp = 0;
+     addIntParallelRoot(&removed, &temp, 1, i);
+     if(i == getMyRank())
+       total_removed = temp;
+   }
+
+   int local_left  = local_total - removed;
+
+   int local_max = -1, local_sum = 0;
+   MPI_Reduce(&local_left, &local_sum, 1, MPI_INT, MPI_SUM, rankOfPrintRank(), MPI_COMM_WORLD);
+   MPI_Reduce(&local_left, &local_max, 1, MPI_INT, MPI_MAX, rankOfPrintRank(), MPI_COMM_WORLD);
+
+   real_t local_percent = ((real_t)local_left / (real_t)(total-total_removed)) * 100.0;
+   printf("Rank %d: %3.1f%% of total (%d)\n", getMyRank(), local_percent, local_left);
 
    if(printRank()) {
-       int total_notRemoved = total - total_removed;
+     int total_notRemoved = total - total_removed;
 
+     double max, avg;
+     max = (double)local_max;
+     avg = (double)local_sum / (double)getNRanks();
+     printf("%d Max, %d Sum\n", local_max, local_sum);
+     printf("Imbalance: %3.2f%%\n", ((max-avg) / avg) * 100.0);
 
       fprintf(screenOut,
               "Cutout holes:\n"
-              "  fraction removed:    %3.1f%\n"
+              "  fraction removed:    %3.1f%%\n"
               "  atoms_removed: %9d\n"
               "  atoms_before:  %9d\n"
               "  atoms_left:    %9d\n"
@@ -309,7 +331,7 @@ void performCutout(struct SimFlatSt* s, int count, const double radius)
 
        fprintf(yamlFile,
                "Cutout holes:\n"
-               "  fraction removed:    %3.1f%\n"
+               "  fraction removed:    %3.1f%%\n"
                "  atoms_removed: %9d\n"
                "  atoms_before:  %9d\n"
                "  atoms_left:    %9d\n"

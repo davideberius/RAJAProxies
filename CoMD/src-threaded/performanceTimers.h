@@ -5,7 +5,7 @@
 
 #include <stdio.h>
 
-//#define USE_CALIPER
+#define USE_CALIPER
 #ifdef USE_CALIPER
 #include <caliper/cali.h>
 #endif
