@@ -25,6 +25,18 @@ typedef struct AtomsSt
    real_t* U;     //!< potential energy per atom
 } Atoms;
 
+typedef struct PackedAtomsSt
+{
+  int nAtoms;
+
+  int *gid;
+  int *bid;
+  int *offsets;
+
+  real3  *r;
+  real3  *f;
+  real_t *U;
+} PackedAtoms;
 
 /// Allocates memory to store atom data.
 Atoms* initAtoms(struct LinkCellSt* boxes);

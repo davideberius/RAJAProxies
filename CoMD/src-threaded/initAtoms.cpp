@@ -328,7 +328,7 @@ void performCutout(struct SimFlatSt* s, int count, const double radius)
               total,
               total_notRemoved
              );
-
+      /*
        fprintf(yamlFile,
                "Cutout holes:\n"
                "  fraction removed:    %3.1f%%\n"
@@ -342,5 +342,6 @@ void performCutout(struct SimFlatSt* s, int count, const double radius)
                total,
                total_notRemoved
             );
+      */
   }
 }

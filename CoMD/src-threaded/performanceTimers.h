@@ -10,6 +10,8 @@
 #include <caliper/cali.h>
 #endif
 
+//#define PACK_FORCE
+
 /// Timer handles
 enum TimerHandle{
    totalTimer, 
@@ -28,6 +30,9 @@ enum TimerHandle{
    atomUnpackTimer,
    atomSortTimer,
    computeForceTimer,
+#ifdef PACK_FORCE
+   forceScanTimer,
+#endif
    forceZeroingTimer,
    forceFunctionTimer,
    eamHaloTimer,

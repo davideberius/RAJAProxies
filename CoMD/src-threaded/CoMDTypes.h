@@ -84,6 +84,9 @@ typedef struct SimFlatSt
    LinkCell* boxes;       //<! link-cell data
 
    Atoms* atoms;          //<! atom data (positions, momenta, ...)
+#ifdef PACK_FORCE
+   PackedAtoms *p_atoms;  //<! data structure for packing atoms in force function
+#endif
 
    SpeciesData* species;  //<! species data (per species, not per atom)
 
@@ -194,6 +197,17 @@ typedef RAJA::KernelPolicy<
 #else
   RAJA::statement::CudaKernel<
 #endif
+    RAJA::statement::For<0, RAJA::cuda_block_x_loop,
+    RAJA::statement::For<1, RAJA::cuda_warp_loop,
+    RAJA::statement::For<2, RAJA::cuda_thread_y_loop,
+    RAJA::statement::Lambda<0> > > > > > atomWorkKernelChunk;
+
+typedef RAJA::KernelPolicy<
+#ifdef CUDA_ASYNC
+  RAJA::statement::CudaKernelAsync<
+#else
+  RAJA::statement::CudaKernel<
+#endif
     RAJA::statement::Tile<0, RAJA::statement::tile_fixed<128>, RAJA::cuda_block_x_loop,
     RAJA::statement::For<0, RAJA::cuda_thread_x_loop,
     RAJA::statement::Lambda<0> > > > > redistributeKernel;
@@ -210,6 +224,16 @@ typedef RAJA::KernelPolicy<
     RAJA::statement::For<2, RAJA::cuda_warp_loop,
     RAJA::statement::For<3, RAJA::cuda_thread_y_loop,
     RAJA::statement::Lambda<0> > > > > > > forcePolicyKernel;
+
+typedef RAJA::KernelPolicy<
+#ifdef CUDA_ASYNC
+  RAJA::statement::CudaKernelAsync<
+#else
+  RAJA::statement::CudaKernel<
+#endif
+    RAJA::statement::For<0, RAJA::cuda_block_x_loop,
+    RAJA::statement::For<1, RAJA::cuda_thread_x_loop,
+    RAJA::statement::Lambda<0> > > > > forcePolicyKernelPacked;
 
 typedef RAJA::ReduceSum<RAJA::seq_reduce, real_t> rajaReduceSumReal;
 typedef RAJA::ReduceSum<RAJA::cuda_reduce, real_t> rajaReduceSumRealKernel;

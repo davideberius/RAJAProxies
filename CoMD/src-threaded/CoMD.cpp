@@ -102,20 +102,20 @@ int main(int argc, char** argv)
    initSubsystems();
    timestampBarrier("Starting Initialization\n");
 
-   yamlAppInfo(yamlFile);
-   yamlAppInfo(screenOut);
+   //yamlAppInfo(yamlFile);
+   //yamlAppInfo(screenOut);
 
    Command cmd = parseCommandLine(argc, argv);
    // if cmd.seed is not supplied as argument, make sure it is the same on all nodes
    bcastParallel(&cmd.seed, 1, 0);
    srand(cmd.seed);
 
-   printCmdYaml(yamlFile, &cmd);
-   printCmdYaml(screenOut, &cmd);
+   //printCmdYaml(yamlFile, &cmd);
+   //printCmdYaml(screenOut, &cmd);
 
    SimFlat* sim = initSimulation(cmd);
-   printSimulationDataYaml(yamlFile, sim);
-   printSimulationDataYaml(screenOut, sim);
+   //printSimulationDataYaml(yamlFile, sim);
+   //printSimulationDataYaml(screenOut, sim);
 
    Validate* validate = initValidate(sim); // atom counts, energy
    timestampBarrier("Initialization Finished\n");
@@ -156,6 +156,7 @@ int main(int argc, char** argv)
    profileStop(loopTimer);
 
    sumAtoms(sim);
+
    printThings(sim, iStep, getElapsedTime(timestepTimer));
    timestampBarrier("Ending simulation\n");
 
@@ -163,8 +164,8 @@ int main(int argc, char** argv)
    validateResult(validate, sim);
    profileStop(totalTimer);
 
-   printPerformanceResults(sim->atoms->nGlobal, sim->printRate);
-   printPerformanceResultsYaml(yamlFile);
+   //printPerformanceResults(sim->atoms->nGlobal, sim->printRate);
+   //printPerformanceResultsYaml(yamlFile);
 
    destroySimulation(&sim);
    comdFree(validate);
@@ -196,6 +197,9 @@ SimFlat* initSimulation(Command cmd)
    sim->domain = NULL;
    sim->boxes = NULL;
    sim->atoms = NULL;
+#ifdef PACK_FORCE
+   sim->p_atoms = NULL;
+#endif
    sim->ePotential = 0.0;
    sim->eKinetic = 0.0;
    sim->atomExchange = NULL;
@@ -327,6 +331,20 @@ SimFlat* initSimulation(Command cmd)
 
    // remove some atoms to create load-imbalance
    performCutout(sim, cmd.holeCount, cmd.holeRadius);
+
+#ifdef PACK_FORCE
+   const float scalar = 1.5;
+
+   sim->p_atoms = (PackedAtoms*)comdMalloc(sizeof(PackedAtoms));
+
+   sim->p_atoms->gid     = (int*)comdMalloc((size_t)(sim->atoms->nLocal * scalar) * sizeof(int));
+   sim->p_atoms->bid     = (int*)comdMalloc((size_t)(sim->atoms->nLocal * scalar) * sizeof(int));
+   sim->p_atoms->offsets = (int*)comdMalloc(sim->boxes->nTotalBoxes * sizeof(int));
+
+   sim->p_atoms->r       = (real3*)comdMalloc((size_t)(sim->atoms->nLocal * scalar) * sizeof(real3));
+   sim->p_atoms->f       = (real3*)comdMalloc((size_t)(sim->atoms->nLocal * scalar) * sizeof(real3));
+   sim->p_atoms->U       = (real_t*)comdMalloc((size_t)(sim->atoms->nLocal * scalar) * sizeof(real_t));
+#endif
    
    // Forces must be computed before we call the time stepper.
    startTimer(redistributeTimer);
@@ -354,6 +372,14 @@ void destroySimulation(SimFlat** ps)
    if ( pot) pot->destroy(&pot);
    destroyLinkCells(&(s->boxes));
    destroyAtoms(s->atoms);
+#ifdef PACK_FORCE
+     comdFree(s->p_atoms->gid);
+     comdFree(s->p_atoms->offsets);
+     comdFree(s->p_atoms->r);
+     comdFree(s->p_atoms->f);
+     comdFree(s->p_atoms->U);
+     comdFree(s->p_atoms);
+#endif
    destroyHaloExchange(&(s->atomExchange));
    comdFree(s->species);
    comdFree(s->domain);
@@ -369,7 +395,7 @@ void initSubsystems(void)
    freopen("testOut.txt","w",screenOut);
 #endif
 
-   yamlBegin();
+   //yamlBegin();
 }
 
 void finalizeSubsystems(void)
@@ -377,7 +403,7 @@ void finalizeSubsystems(void)
 #if REDIRECT_OUTPUT
    fclose(screenOut);
 #endif
-   yamlEnd();
+   //yamlEnd();
 }
 
 /// decide whether to get LJ or EAM potentials

@@ -72,18 +72,12 @@
 #include "memUtils.h"
 #include "CoMDTypes.h"
 
+//#include <cuda_profiler_api.h>
+
 #define POT_SHIFT 1.0
 
-#define ATOM_REDUCE
-#define TIME_STUFF
-
-#ifdef ATOM_REDUCE
-FILE *atom_fptr;
-#endif
-#ifdef TIME_STUFF
-FILE *time_fptr;
-#endif
-
+//#define ATOM_REDUCE
+//#define TIME_STUFF
 
 /// Derived struct for a Lennard Jones potential.
 /// Polymorphic with BasePotential.
@@ -152,8 +146,19 @@ void ljPrint(FILE* file, BasePotential* pot)
    fprintf(file, "  Sigma            : " FMT1 " Angstroms\n", ljPot->sigma);
 }
 
+/*
+static __device__ uint get_smid(void) {
+  uint ret;
+  asm("mov.u32 %0, %%smid;" : "=r"(ret) );
+  return ret;
+}
+*/
 int ljForce(SimFlat* s)
 {
+#ifdef PACK_FORCE
+   int chunk_size, chunks;
+#endif
+
    LjPotential* pot = (LjPotential *) s->pot;
    const real_t sigma = pot->sigma;
    const real_t epsilon = pot->epsilon;
@@ -166,33 +171,63 @@ int ljForce(SimFlat* s)
    // zero forces and energy
    rajaReduceSumRealKernel ePot(0.0);
 
+   int rank;
+   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+#ifdef PACK_FORCE
+   const int x_threads = 1024, y_threads = 1, total_threads = x_threads*y_threads;
+#else
    const int x_threads = 32, y_threads = 28, total_threads = x_threads*y_threads;
+#endif
 #ifdef ATOM_REDUCE
    static int atom_reduce_count = 0;
+   FILE *atom_fptr = NULL, *interact_fptr = NULL;
+   char atom_fname[32], interact_fname[32];
 
-   if(atom_reduce_count == 0)
-     atom_fptr = fopen("atom_output.dat", "w+");
+   sprintf(atom_fname, "atom_output_%d.dat", rank);
+   sprintf(interact_fname, "interact_output_%d.dat", rank);
+
+   if(atom_reduce_count == 0) {
+     atom_fptr = fopen(atom_fname, "w+");
+     interact_fptr = fopen(interact_fname, "w+");
+   }
+   else {
+     atom_fptr = fopen(atom_fname, "a");
+     interact_fptr = fopen(interact_fname, "a");
+   }
    atom_reduce_count++;
 
    long *blockCounts = (long*)comdMalloc(80*sizeof(long));
+   long *blockCountsInteract = (long*)comdMalloc(80*sizeof(long));
    long *prev = (long*)comdMalloc(80*sizeof(long));
    for(int i = 0; i < 80; i++) {
      blockCounts[i] = 0;
+     blockCountsInteract[i] = 0;
      prev[i] = -1;
    }
 
-   long *threadCounts = (long*)comdMalloc(total_threads*sizeof(long));
-   for(int i = 0; i < total_threads; i++) {
-     threadCounts[i] = 0;
+   long *threadCounts = (long*)comdMalloc(80*total_threads*sizeof(long));
+   long *threadCountsInteract = (long*)comdMalloc(80*total_threads*sizeof(long));
+   int b_offset = 0;
+   for(int i = 0; i < 80; i++) {
+     for(int j = 0; j < total_threads; j++) {
+       threadCounts[b_offset+j] = 0;
+       threadCountsInteract[b_offset+j] = 0;
+     }
+     b_offset += total_threads;
    }
 #endif
 
-#define TIME_STUFF
 #ifdef TIME_STUFF
    static int time_count = 0;
+   FILE *time_fptr = NULL;
+   char time_fname[32];
+
+   sprintf(time_fname, "time_output_%d.dat", rank);
 
    if(time_count == 0)
-     time_fptr = fopen("time_output.dat", "w+");
+     time_fptr = fopen(time_fname, "w+");
+   else
+     time_fptr = fopen(time_fname, "a");
    time_count++;
 
    long long **start, **stop;
@@ -200,16 +235,91 @@ int ljForce(SimFlat* s)
    stop  = (long long**)comdMalloc(80*sizeof(long long*));
 
    for(int i = 0; i < 80; i++) {
-     start[i] = (long long*)comdMalloc(y_threads*sizeof(long long));
-     stop[i]  = (long long*)comdMalloc(y_threads*sizeof(long long));
-     for(int j = 0; j < y_threads; j++)
+     start[i] = (long long*)comdMalloc(total_threads*sizeof(long long));
+     stop[i]  = (long long*)comdMalloc(total_threads*sizeof(long long));
+     for(int j = 0; j < total_threads; j++)
        start[i][j] = stop[i][j] = -1;
    }
 #endif
 
    ePotential = 0.0;
 
+#ifdef PACK_FORCE
+   //printf("Packing... %d boxes\n", s->boxes->nTotalBoxes);
+   chunk_size = 32;
+   chunks = s->boxes->nTotalBoxes / chunk_size;
+   if(s->boxes->nTotalBoxes % chunk_size != 0)
+     chunks++;
+
+   profileStart(forceScanTimer);
+  RAJA::kernel<atomWorkKernelChunk>(
+  RAJA::make_tuple(
+    RAJA::RangeSegment(0, chunks),
+    //RAJA::RangeSegment(0, MAXATOMS),
+    RAJA::RangeSegment(0, 32),
+    RAJA::RangeSegment(0, chunk_size) ),
+    [=] COMD_DEVICE (int chunk_num, int iOffLocal, int box_num) {
+      const int iBox = (chunk_size*chunk_num) + box_num;
+      if(iBox < s->boxes->nTotalBoxes) {
+      const int nIBox = s->boxes->nAtoms[iBox];
+      if(iOffLocal < nIBox) {
+        int offset = 0;
+        for(int i = 0; i < iBox; i++) {
+          offset += s->boxes->nAtoms[i];
+        }
+        if(iOffLocal == 0)
+          s->p_atoms->offsets[iBox] = offset;
+      }
+      }
+    } ) ;
+   profileStop(forceScanTimer);
+#endif
+
    profileStart(forceZeroingTimer);
+#ifdef PACK_FORCE
+   //printf("Packing... %d boxes\n", s->boxes->nTotalBoxes);
+   chunk_size = 32;
+   chunks = s->boxes->nTotalBoxes / chunk_size;
+   if(s->boxes->nTotalBoxes % chunk_size != 0)
+     chunks++;
+
+  RAJA::kernel<atomWorkKernelChunk>(
+  RAJA::make_tuple(
+    RAJA::RangeSegment(0, chunks),
+    //RAJA::RangeSegment(0, MAXATOMS),
+    RAJA::RangeSegment(0, 32),
+    RAJA::RangeSegment(0, chunk_size) ),
+    [=] COMD_DEVICE (int chunk_num, int iOffLocal, int box_num) {
+      const int iBox = (chunk_size*chunk_num) + box_num;
+      if(iBox < s->boxes->nTotalBoxes) {
+      const int nIBox = s->boxes->nAtoms[iBox];
+      if(iOffLocal < nIBox) {
+        const int iOff = iOffLocal + (iBox * MAXATOMS);
+
+        const int index = s->p_atoms->offsets[iBox]+iOffLocal;
+        s->p_atoms->gid[index]  = s->atoms->gid[iOff];
+        s->p_atoms->bid[index]  = iBox;
+
+        s->p_atoms->r[index][0] = s->atoms->r[iOff][0];
+        s->p_atoms->r[index][1] = s->atoms->r[iOff][1];
+        s->p_atoms->r[index][2] = s->atoms->r[iOff][2];
+
+        if(iBox < s->boxes->nLocalBoxes) {
+          s->p_atoms->f[index][0] = 0.0;
+          s->p_atoms->f[index][1] = 0.0;
+          s->p_atoms->f[index][2] = 0.0;
+          s->p_atoms->U[index]    = 0.0;
+        }
+        else {
+          s->p_atoms->f[index][0] = s->atoms->f[iOff][0];
+          s->p_atoms->f[index][1] = s->atoms->f[iOff][1];
+          s->p_atoms->f[index][2] = s->atoms->f[iOff][2];
+          s->p_atoms->U[index]    = s->atoms->U[iOff];
+        }
+      }
+      }
+    } ) ;
+#else
   RAJA::kernel<atomWorkKernel>(
   RAJA::make_tuple(
     RAJA::RangeSegment(0, s->boxes->nLocalBoxes),
@@ -226,10 +336,103 @@ int ljForce(SimFlat* s)
         U[iOff] = 0.0;
       }
     } ) ;
-
+#endif
    profileStop(forceZeroingTimer);
+
    {
-   profileStart(forceFunctionTimer);
+     MPI_Barrier(MPI_COMM_WORLD);
+     //cudaProfilerStart();
+#ifdef USE_CALIPER
+     CALI_MARK_BEGIN("ForceFunction");
+#endif
+     profileStart(forceFunctionTimer);
+#ifdef PACK_FORCE
+   //printf("Force...\n");
+   chunk_size = 1024;//892;
+   chunks = s->atoms->nLocal / chunk_size;
+   if(s->atoms->nLocal % chunk_size != 0)
+     chunks++;
+
+     RAJA::kernel<forcePolicyKernelPacked>(
+       RAJA::make_tuple(
+         RAJA::RangeSegment(0, chunks),     // Loop over chunks
+         RAJA::RangeSegment(0, chunk_size) ), // Atoms within each chunk
+       [=] COMD_DEVICE (int chunkNum, int atomNum) {
+         const int iOff = (chunkNum * chunk_size) + atomNum;
+         const int iBoxID = s->p_atoms->bid[iOff];
+         const int nLocalBoxes = s->boxes->nLocalBoxes;
+
+         if(iOff < s->atoms->nLocal) {
+           //smid[blockIdx.x] = get_smid();
+#ifdef TIME_STUFF
+         if(start[blockIdx.x][threadIdx.x] == -1)
+           start[blockIdx.x][threadIdx.x] = clock64();
+#endif
+#ifdef ATOM_REDUCE
+         //blockCounts[blockIdx.x]++;
+         threadCounts[(blockIdx.x*total_threads)+threadIdx.x]++;
+#endif
+
+         for(int nghb = 0; nghb < 27; nghb++) {
+           const int jBoxID = s->boxes->nbrBoxes[iBoxID][nghb];
+           const int nJBox = s->boxes->nAtoms[jBoxID];
+           for(int jOff = s->p_atoms->offsets[jBoxID]; jOff < s->p_atoms->offsets[jBoxID]+nJBox; jOff++) {
+             const int iGid = s->p_atoms->gid[iOff];
+             const int jGid = s->p_atoms->gid[jOff];
+             if(!(jBoxID < nLocalBoxes && jGid <= iGid)) {
+               threadCountsInteract[(blockIdx.x*total_threads)+threadIdx.x]++;
+               real3 dr;
+               real_t r2 = 0.0;
+               real3_ptr r =  s->p_atoms->r;
+
+               for (int m=0; m<3; m++)
+               {
+                 dr[m] = r[iOff][m] - r[jOff][m];
+                 r2 += dr[m]*dr[m];
+               }
+               if ( r2 <= rCut2 && r2 > 0.0)
+               {
+                 // Important note:
+                 // from this point on r actually refers to 1.0/r
+
+                 real_ptr U = s->p_atoms->U ;
+                 real3_ptr f = s->p_atoms->f ;
+
+                 r2 = 1.0/r2;
+                 const real_t r6 = s6 * (r2*r2*r2);
+                 const real_t eLocal = r6 * (r6 - 1.0) - eShift;
+                 U[iOff] += 0.5*eLocal; // Shouldn't this be atomic too?
+
+                 if (jBoxID < nLocalBoxes)
+                   ePot += eLocal;
+                 else
+                   ePot += 0.5*eLocal;
+
+                 // different formulation to avoid sqrt computation
+                 const real_t fr = - 4.0*epsilon*r6*r2*(12.0*r6 - 6.0);
+
+                 for (int m=0; m<3; m++)
+                 {
+                   dr[m] *= fr;
+#ifdef DO_CUDA
+                   atomicAdd(&f[iOff][m], -dr[m]);
+                   atomicAdd(&f[jOff][m], dr[m]);
+#else
+                   f[iOff][m] -= dr[m];
+                   f[jOff][m] += dr[m];
+#endif
+                 }
+               } //end if within cutoff
+             } //end if atoms exist
+           } //end jOff loop
+         } // end nghb loop
+         }
+#ifdef TIME_STUFF
+         stop[blockIdx.x][threadIdx.x] = clock64();
+#endif
+       });
+
+#else
      RAJA::kernel<forcePolicyKernel>(
        RAJA::make_tuple(
          *s->isLocalSegment,                // local boxes
@@ -244,10 +447,20 @@ int ljForce(SimFlat* s)
          const int iOffLocal = iOff;
          const int jOffLocal = jOff;
 
+#ifndef PACK_FORCE
          iOff += iBoxID*MAXATOMS;
          jOff += jBoxID*MAXATOMS;
+#else
+         iOff += s->p_atoms->offsets[iBoxID];
+         jOff += s->p_atoms->offsets[jBoxID];
+#endif
+#ifndef PACK_FORCE
          const int iGid = s->atoms->gid[iOff];
          const int jGid = s->atoms->gid[jOff];
+#else
+         const int iGid = s->p_atoms->gid[iOff];
+         const int jGid = s->p_atoms->gid[jOff];
+#endif
 
 #ifdef TIME_STUFF
          if(threadIdx.x == 0 && start[blockIdx.x][threadIdx.y] == -1) {
@@ -273,7 +486,11 @@ int ljForce(SimFlat* s)
 #endif
            real3 dr;
            real_t r2 = 0.0;
+#ifndef PACK_FORCE
            real3_ptr r =  s->atoms->r;
+#else
+           real3_ptr r =  s->p_atoms->r;
+#endif
            for (int m=0; m<3; m++)
            {
              dr[m] = r[iOff][m] - r[jOff][m];
@@ -283,8 +500,13 @@ int ljForce(SimFlat* s)
            {
              // Important note:
              // from this point on r actually refers to 1.0/r
+#ifndef PACK_FORCE
              real_ptr U = s->atoms->U ;
              real3_ptr f = s->atoms->f ;
+#else
+             real_ptr U = s->p_atoms->U ;
+             real3_ptr f = s->p_atoms->f ;
+#endif
              r2 = 1.0/r2;
              const real_t r6 = s6 * (r2*r2*r2);
              const real_t eLocal = r6 * (r6 - 1.0) - eShift;
@@ -322,147 +544,100 @@ int ljForce(SimFlat* s)
          stop[blockIdx.x][threadIdx.y] = clock64();
 #endif
        });
-     MPI_Barrier(MPI_COMM_WORLD);
-   profileStop(forceFunctionTimer);
-   }
+#endif
 
-   long sum = 0, max, min;
-   real_t average, imbalance;
+     //MPI_Barrier(MPI_COMM_WORLD);
+     profileStop(forceFunctionTimer);
+#ifdef USE_CALIPER
+CALI_MARK_END("ForceFunction");
+#endif
+//cudaProfilerStop();
+   }
+#ifdef PACK_FORCE
+   //printf("Unpacking...\n");
+  RAJA::kernel<atomWorkKernel>(
+  RAJA::make_tuple(
+    RAJA::RangeSegment(0, s->boxes->nTotalBoxes),
+    RAJA::RangeSegment(0, MAXATOMS) ),
+    [=] COMD_DEVICE (int iBox, int iOffLocal) {
+      const int nIBox = s->boxes->nAtoms[iBox];
+      if(iOffLocal < nIBox) {
+        const int iOff = iOffLocal + (iBox * MAXATOMS);
+        real3_ptr f = s->atoms->f;
+        real_ptr U = s->atoms->U;
+
+        const int index = s->p_atoms->offsets[iBox]+iOffLocal;
+        f[iOff][0] = s->p_atoms->f[index][0];
+        f[iOff][1] = s->p_atoms->f[index][1];
+        f[iOff][2] = s->p_atoms->f[index][2];
+        U[iOff]    = s->p_atoms->U[index];
+      }
+    } ) ;
+#endif
+
+  /*printf("\nBlock to SM Translations:\n");
+  for(int i = 0; i < 80; i++) {
+    printf("Block %d: %d\n", i, smid[i]);
+  }*/
+
 #ifdef ATOM_REDUCE
+   b_offset = 0;
    fprintf(atom_fptr, "%d %d %d %d\n", atom_reduce_count, 80, x_threads, y_threads);
+   fprintf(interact_fptr, "%d %d %d %d\n", atom_reduce_count, 80, x_threads, y_threads);
+#ifdef PACK_FORCE
+   for(int i = 0; i < 80; i++) {
+     blockCounts[i] = 0;
+     for(int j = 0; j < total_threads; j++){
+       blockCounts[i] += threadCounts[b_offset+j];
+       blockCountsInteract[i] += threadCountsInteract[b_offset+j];
+     }
+     b_offset += total_threads;
+   }
+#endif
+
    for(int i = 0; i < 80; i++) {
      fprintf(atom_fptr, "%ld ", blockCounts[i]);
+     fprintf(interact_fptr, "%ld ", blockCountsInteract[i]);
    }
    fprintf(atom_fptr, "\n");
-   for(int i = 0; i < total_threads; i++) {
-     fprintf(atom_fptr, "%ld ", threadCounts[i]);
+   fprintf(interact_fptr, "\n");
+   b_offset = 0;
+   for(int b = 0; b < 80; b++){
+     for(int i = 0; i < total_threads; i++) {
+       fprintf(atom_fptr, "%ld ", threadCounts[b_offset+i]);
+       fprintf(interact_fptr, "%ld ", threadCountsInteract[b_offset+i]);
+     }
+     b_offset += total_threads;
+     fprintf(atom_fptr, "\n");
+     fprintf(interact_fptr, "\n");
    }
-   fprintf(atom_fptr, "\n");
-   /*
-     max = min = blockCounts[0];
 
-     for(int i = 0; i < 80; i++) {
-       sum += blockCounts[i];
-       if(blockCounts[i] > max)
-         max = blockCounts[i];
-       if(blockCounts[i] < min)
-         min = blockCounts[i];
-     }
+//if(atom_reduce_count == s->nSteps)
+   fclose(atom_fptr);
+   comdFree(blockCounts);
+   comdFree(threadCounts);
+   fclose(interact_fptr);
+   comdFree(blockCountsInteract);
+   comdFree(threadCountsInteract);
 
-     average = (real_t)sum / 80.0;
-     imbalance = (((real_t)max - average) / average) * 100.0;
-     printf("Blocks:\n");
-     printf("Sum: %ld (%ld -> %ld)\nAverage: %lf\nImbalance: %3.2f%%\n", sum, min, max, average, imbalance);
-
-     int local_maxima[28] = {0};
-
-     sum = 0;
-     max = min = threadCounts[0];
-     int zeros = 0;
-     printf("0\t");
-     for(int i = 0; i < y_threads; i++)
-       printf("%d\t", i);
-     printf("\n");
-     for(int i = 0; i < x_threads; i++) {
-       printf("%d\t", i);
-       for(int j = 0; j < y_threads; j++) {
-         int count = threadCounts[(i*y_threads)+j];
-         printf("%d\t", count);
-         //printf("Thread (%d,%d): %ld\n", i, j, count);
-         if(count > max)
-           max = count;
-         if(count < min)
-           min = count;
-         if(count == 0)
-           zeros++;
-         if(count > local_maxima[j])
-           local_maxima[j] = count;
-         sum += count;
-       }
-       printf("\n");
-     }
-
-     average = (real_t)sum / (double)(total_threads);
-     imbalance = (((real_t)max - average) / average) * 100.0;
-     printf("Block 0:\n");
-     printf("Sum: %ld (%ld -> %ld)\nAverage: %lf\nImbalance: %3.2f%%\nZeros: %d (%3.2f%%)\n", sum, min, max, average, imbalance, zeros, ((double)zeros / (double)(total_threads))*100.0 );
-
-     sum = max = 0;
-     min = local_maxima[0];
-     for(int i = 0; i < y_threads; i++) {
-       sum += local_maxima[i];
-       if(local_maxima[i] > max)
-         max = local_maxima[i];
-       if(local_maxima[i] < min)
-         min = local_maxima[i];
-     }
-
-     average = (real_t)sum / (double)(y_threads);
-     imbalance = (((real_t)max - average) / average) * 100.0;
-     printf("Warp Sum: %ld (%ld -> %ld)\nWarp Average: %lf\nWarp Imbalance: %3.2f%%\n\n", sum, min, max, average, imbalance);
-*/
-     if(atom_reduce_count == s->nSteps)
-       fclose(atom_fptr);
-     comdFree(blockCounts);
-     comdFree(threadCounts);
 #endif
 
 #ifdef TIME_STUFF
-     fprintf(time_fptr, "%d %d %d\n", time_count, 80, y_threads);
-     for(int i = 0; i < 80; i++) {
-       for(int j = 0; j < y_threads; j++) {
-         fprintf(time_fptr, "%lld ", stop[i][j]-start[i][j]);
-       }
-       fprintf(time_fptr, "\n");
+   fprintf(time_fptr, "%d %d %d\n", time_count, 80, total_threads);
+   for(int i = 0; i < 80; i++) {
+     for(int j = 0; j < total_threads; j++) {
+       fprintf(time_fptr, "%lld ", stop[i][j]-start[i][j]);
      }
-     /*
-     long long block_max = 0;
-     sum = 0;
-     for(int i = 0; i < 80; i++) {
-       max = 0;
-       min = stop[i][0]-start[i][0];
-       for(int j = 0; j < y_threads; j++) {
-         int value = stop[i][j]-start[i][j];
-         if(value > max)
-           max = value;
-         if(value < min)
-           min = value;
-       }
-       sum += max;
-       if(max > block_max)
-         block_max = max;
-     }
-     max = block_max;
-     average = (real_t)sum / (double)(80);
-     imbalance = (((real_t)max - average) / average) * 100.0;
-     printf("Block Time Sum: %ld (%ld -> %ld)\nBlock Time Average: %lf\nBlock Time Imbalance: %3.2f%%\n\n", sum, min, max, average, imbalance);
+     fprintf(time_fptr, "\n");
+   }
 
-     sum = 0;
-     for(int i = 0; i < 1; i++) {
-       max = 0;
-       min = stop[i][0]-start[i][0];
-       for(int j = 0; j < y_threads; j++) {
-         int value = stop[i][j]-start[i][j];
-         sum += value;
-         if(value > max)
-           max = value;
-         if(value < min)
-           min = value;
-       }
-     }
-
-     average = (real_t)sum / (double)(y_threads);
-     imbalance = (((real_t)max - average) / average) * 100.0;
-     printf("Warp Time Sum: %ld (%ld -> %ld)\nWarp Time Average: %lf\nWarp Time Imbalance: %3.2f%%\n\n", sum, min, max, average, imbalance);
-     */
-     if(time_count == s->nSteps)
-       fclose(time_fptr);
-     for(int i = 0; i < 80; i++) {
-       comdFree(start[i]);
-       comdFree(stop[i]);
-     }
-       comdFree(start);
-       comdFree(stop);
+   fclose(time_fptr);
+   for(int i = 0; i < 80; i++) {
+     comdFree(start[i]);
+     comdFree(stop[i]);
+   }
+   comdFree(start);
+   comdFree(stop);
 #endif
 
    ePotential = ePot*4.0*epsilon;

@@ -70,6 +70,9 @@ const char* timerName[numberOfTimers] = {
    "      atomUnpack",
    "    atomSort",
    "  force",
+#ifdef PACK_FORCE
+   "    forceScan",
+#endif
    "    forceZeroing",
    "    forceFunction",
    "    eamHalo",
@@ -111,7 +114,7 @@ void profileStart(const enum TimerHandle handle)
 {
   //printf("Starting Timer for '%s'\n", timerName[handle]);
   #ifdef USE_CALIPER
-  CALI_MARK_BEGIN(timerName[handle]);
+  //CALI_MARK_BEGIN(timerName[handle]);
   #endif
   perfTimer[handle].start = getTime();
 }
@@ -123,7 +126,7 @@ void profileStop(const enum TimerHandle handle)
    perfTimer[handle].total += delta;
    perfTimer[handle].elapsed += delta;
   #ifdef USE_CALIPER
-  CALI_MARK_END(timerName[handle]);
+   //CALI_MARK_END(timerName[handle]);
   #endif
 }
 
