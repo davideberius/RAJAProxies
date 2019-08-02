@@ -72,12 +72,16 @@
 #include "memUtils.h"
 #include "CoMDTypes.h"
 
-//#include <cuda_profiler_api.h>
+#ifdef DO_CUDA
+#include <cuda_profiler_api.h>
+#endif
 
 #define POT_SHIFT 1.0
 
-//#define ATOM_REDUCE
+#define ATOM_REDUCE
 //#define TIME_STUFF
+
+#define CPU_TIME
 
 /// Derived struct for a Lennard Jones potential.
 /// Polymorphic with BasePotential.
@@ -178,11 +182,13 @@ int ljForce(SimFlat* s)
 #else
    const int x_threads = 32, y_threads = 28, total_threads = x_threads*y_threads;
 #endif
+
 #ifdef ATOM_REDUCE
    static int atom_reduce_count = 0;
    FILE *atom_fptr = NULL, *interact_fptr = NULL;
    char atom_fname[32], interact_fname[32];
 
+#ifdef DO_CUDA
    sprintf(atom_fname, "atom_output_%d.dat", rank);
    sprintf(interact_fname, "interact_output_%d.dat", rank);
 
@@ -194,8 +200,17 @@ int ljForce(SimFlat* s)
      atom_fptr = fopen(atom_fname, "a");
      interact_fptr = fopen(interact_fname, "a");
    }
+#else
+   sprintf(atom_fname, "mpi_count_output_%d.dat", rank);
+   if(atom_reduce_count == 0)
+     atom_fptr = fopen(atom_fname, "w+");
+   else
+     atom_fptr = fopen(atom_fname, "a");
+#endif
+
    atom_reduce_count++;
 
+#ifdef DO_CUDA
    long *blockCounts = (long*)comdMalloc(80*sizeof(long));
    long *blockCountsInteract = (long*)comdMalloc(80*sizeof(long));
    long *prev = (long*)comdMalloc(80*sizeof(long));
@@ -215,6 +230,10 @@ int ljForce(SimFlat* s)
      }
      b_offset += total_threads;
    }
+#else
+   long *counts = (long*)comdMalloc(2*sizeof(long));
+   counts[0] = counts[1] = 0;
+#endif
 #endif
 
 #ifdef TIME_STUFF
@@ -240,6 +259,22 @@ int ljForce(SimFlat* s)
      for(int j = 0; j < total_threads; j++)
        start[i][j] = stop[i][j] = -1;
    }
+#endif
+
+#ifdef CPU_TIME
+   static int cpu_time_count = 0;
+   FILE *cpu_time_fptr = NULL;
+   char cpu_time_fname[32];
+
+   sprintf(cpu_time_fname, "cpu_time_output_%d.dat", rank);
+
+   if(cpu_time_count == 0)
+     cpu_time_fptr = fopen(cpu_time_fname, "w+");
+   else
+     cpu_time_fptr = fopen(cpu_time_fname, "a");
+   cpu_time_count++;
+
+   double cpu_time = -1.0;
 #endif
 
    ePotential = 0.0;
@@ -341,11 +376,16 @@ int ljForce(SimFlat* s)
 
    {
      MPI_Barrier(MPI_COMM_WORLD);
-     //cudaProfilerStart();
+#ifdef DO_CUDA
+     cudaProfilerStart();
+#endif
 #ifdef USE_CALIPER
      CALI_MARK_BEGIN("ForceFunction");
 #endif
      profileStart(forceFunctionTimer);
+#ifdef CPU_TIME
+     cpu_time = MPI_Wtime();
+#endif
 #ifdef PACK_FORCE
    //printf("Force...\n");
    chunk_size = 1024;//892;
@@ -369,8 +409,12 @@ int ljForce(SimFlat* s)
            start[blockIdx.x][threadIdx.x] = clock64();
 #endif
 #ifdef ATOM_REDUCE
+#ifdef DO_CUDA
          //blockCounts[blockIdx.x]++;
          threadCounts[(blockIdx.x*total_threads)+threadIdx.x]++;
+#else
+         counts[0]++;
+#endif
 #endif
 
          for(int nghb = 0; nghb < 27; nghb++) {
@@ -380,7 +424,13 @@ int ljForce(SimFlat* s)
              const int iGid = s->p_atoms->gid[iOff];
              const int jGid = s->p_atoms->gid[jOff];
              if(!(jBoxID < nLocalBoxes && jGid <= iGid)) {
+#ifdef ATOM_REDUCE
+#ifdef DO_CUDA
                threadCountsInteract[(blockIdx.x*total_threads)+threadIdx.x]++;
+#else
+               counts[1]++;
+#endif
+#endif
                real3 dr;
                real_t r2 = 0.0;
                real3_ptr r =  s->p_atoms->r;
@@ -433,6 +483,11 @@ int ljForce(SimFlat* s)
        });
 
 #else
+#ifndef DO_CUDA
+#ifdef ATOM_REDUCE
+     counts[0] = s->atoms->nLocal;
+#endif
+#endif
      RAJA::kernel<forcePolicyKernel>(
        RAJA::make_tuple(
          *s->isLocalSegment,                // local boxes
@@ -470,6 +525,7 @@ int ljForce(SimFlat* s)
 
          if( (iOffLocal < nIBox && jOffLocal < nJBox) && !(jBoxID < nLocalBoxes && jGid <= iGid)) {
 #ifdef ATOM_REDUCE
+#ifdef DO_CUDA
            if(blockIdx.x == 0) {
              threadCounts[(threadIdx.x*blockDim.y)+threadIdx.y] += 1;
            }
@@ -483,6 +539,9 @@ int ljForce(SimFlat* s)
                prev[blockIdx.x] = iBoxID;
              }
            }
+#else
+           counts[1]++;
+#endif
 #endif
            real3 dr;
            real_t r2 = 0.0;
@@ -547,11 +606,17 @@ int ljForce(SimFlat* s)
 #endif
 
      //MPI_Barrier(MPI_COMM_WORLD);
+#ifdef CPU_TIME
+     cpu_time = MPI_Wtime() - cpu_time;
+#endif
      profileStop(forceFunctionTimer);
+     MPI_Barrier(MPI_COMM_WORLD);
 #ifdef USE_CALIPER
 CALI_MARK_END("ForceFunction");
 #endif
-//cudaProfilerStop();
+#ifdef DO_CUDA
+cudaProfilerStop();
+#endif
    }
 #ifdef PACK_FORCE
    //printf("Unpacking...\n");
@@ -581,6 +646,7 @@ CALI_MARK_END("ForceFunction");
   }*/
 
 #ifdef ATOM_REDUCE
+#ifdef DO_CUDA
    b_offset = 0;
    fprintf(atom_fptr, "%d %d %d %d\n", atom_reduce_count, 80, x_threads, y_threads);
    fprintf(interact_fptr, "%d %d %d %d\n", atom_reduce_count, 80, x_threads, y_threads);
@@ -619,7 +685,13 @@ CALI_MARK_END("ForceFunction");
    fclose(interact_fptr);
    comdFree(blockCountsInteract);
    comdFree(threadCountsInteract);
+#else
+   fprintf(atom_fptr, "%d\n", atom_reduce_count);
+   fprintf(atom_fptr, "%ld %ld\n", counts[0], counts[1]);
 
+   fclose(atom_fptr);
+   comdFree(counts);
+#endif
 #endif
 
 #ifdef TIME_STUFF
@@ -638,6 +710,12 @@ CALI_MARK_END("ForceFunction");
    }
    comdFree(start);
    comdFree(stop);
+#endif
+
+#ifdef CPU_TIME
+   fprintf(cpu_time_fptr, "%d\n", cpu_time_count);
+   fprintf(cpu_time_fptr, "%lf\n", cpu_time);
+   fclose(cpu_time_fptr);
 #endif
 
    ePotential = ePot*4.0*epsilon;

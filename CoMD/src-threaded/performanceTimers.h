@@ -10,7 +10,9 @@
 #include <caliper/cali.h>
 #endif
 
-//#define PACK_FORCE
+#ifdef DO_CUDA
+#define PACK_FORCE
+#endif
 
 /// Timer handles
 enum TimerHandle{

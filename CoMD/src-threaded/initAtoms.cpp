@@ -247,6 +247,10 @@ int is_within_spheres(struct SimFlatSt* s, real3 *sphere_pos, const int count, c
      return 0;
 }
 
+//#define SATURATION 1000000
+//#define SATURATION 200000
+//#define SATURATION 50000
+#define SATURATION 1024*81
 
 void performCutout(struct SimFlatSt* s, int count, const double radius)
 {
@@ -270,6 +274,8 @@ void performCutout(struct SimFlatSt* s, int count, const double radius)
       int nIBox =  s->boxes->nAtoms[iBox]; 
       int iOff=MAXATOMS*iBox;
       int ii = 0;
+      if(local_total - removed < SATURATION)
+        break;
       // loop over atoms in iBox
       while (ii < s->boxes->nAtoms[iBox])
       {
@@ -304,7 +310,13 @@ void performCutout(struct SimFlatSt* s, int count, const double radius)
    MPI_Reduce(&local_left, &local_max, 1, MPI_INT, MPI_MAX, rankOfPrintRank(), MPI_COMM_WORLD);
 
    real_t local_percent = ((real_t)local_left / (real_t)(total-total_removed)) * 100.0;
-   printf("Rank %d: %3.1f%% of total (%d)\n", getMyRank(), local_percent, local_left);
+   for(int i = 0; i < getNRanks(); i++) {
+     if(i == getMyRank()) {
+       printf("Rank %d: %3.1f%% of total (%d)\n", getMyRank(), local_percent, local_left);
+     }
+     fflush(stdout);
+     MPI_Barrier(MPI_COMM_WORLD);
+   }
 
    if(printRank()) {
      int total_notRemoved = total - total_removed;

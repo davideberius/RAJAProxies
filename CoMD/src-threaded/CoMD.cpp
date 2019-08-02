@@ -103,7 +103,7 @@ int main(int argc, char** argv)
    timestampBarrier("Starting Initialization\n");
 
    //yamlAppInfo(yamlFile);
-   //yamlAppInfo(screenOut);
+   yamlAppInfo(screenOut);
 
    Command cmd = parseCommandLine(argc, argv);
    // if cmd.seed is not supplied as argument, make sure it is the same on all nodes
@@ -111,11 +111,11 @@ int main(int argc, char** argv)
    srand(cmd.seed);
 
    //printCmdYaml(yamlFile, &cmd);
-   //printCmdYaml(screenOut, &cmd);
+   printCmdYaml(screenOut, &cmd);
 
    SimFlat* sim = initSimulation(cmd);
    //printSimulationDataYaml(yamlFile, sim);
-   //printSimulationDataYaml(screenOut, sim);
+   printSimulationDataYaml(screenOut, sim);
 
    Validate* validate = initValidate(sim); // atom counts, energy
    timestampBarrier("Initialization Finished\n");
@@ -136,6 +136,7 @@ int main(int argc, char** argv)
       stopTimer(commReduceTimer);
 
       printThings(sim, iStep, getElapsedTime(timestepTimer));
+      fflush(stdout);
 
       startTimer(timestepTimer);
       // Make sure the number of steps is what the user specified, without rounding
